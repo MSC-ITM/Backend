@@ -62,7 +62,7 @@ La API expone contratos REST/OpenAPI para que el Frontend consuma y para que el 
 
 ---
 
-## 🧱 Estructura mínima
+
 ## 🧱 Estructura del Proyecto
 
 backend-api/
