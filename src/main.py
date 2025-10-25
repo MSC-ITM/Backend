@@ -6,11 +6,10 @@ from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from copy import deepcopy
 from math import exp
-from datetime import datetime, UTC
-from sqlmodel import SQLModel, Field as SQLField, Session, select
 import json
-import ia_client
-from typing import Optional
+from datetime import datetime, UTC
+from sqlmodel import SQLModel, Field as SQLField, Session, select, create_engine
+from . import ia_client
 
 
 app = FastAPI(title="Workflow API", version="0.1.0")
@@ -267,7 +266,7 @@ class InMemoryWorkflowRepo:
         return list(self._store.values())
 
 
-_repo = InMemoryWorkflowRepo()
+#_repo = InMemoryWorkflowRepo()
 
 
 # --------------------- Repositorio SQLModel ---------------------
@@ -294,7 +293,7 @@ class SQLiteWorkflowRepo:
             record = WorkflowTable(
                 id=wid,
                 name=name,
-                status="en_progreso",
+                status="en_espera",
                 created_at=now,
                 definition=json.dumps(definition or {}),
             )
@@ -330,25 +329,38 @@ class SQLiteWorkflowRepo:
                 for r in records
             ]
 
+# --- Creación del motor y repositorio ---
+# Usar una base de datos en archivo para persistencia entre reinicios.
+sqlite_file_name = "database.db"
+sqlite_url = f"sqlite:///{sqlite_file_name}"
+
+# connect_args es necesario para SQLite para permitir uso en múltiples hilos (como hace FastAPI)
+engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
+
+_repo = SQLiteWorkflowRepo(engine=engine)
+
+# Asegurarse de que la tabla exista al iniciar la app
+_repo.create_schema()
+
 
 # ----------------------------- Proxy -----------------------------
 
 class AuthProxy:
     """Proxy de autenticación que valida el token y delega operaciones al repositorio."""
 
-    def __init__(self, repo: InMemoryWorkflowRepo) -> None:
+    def __init__(self, repo: SQLiteWorkflowRepo) -> None:
         self._repo = repo
 
     def _validate_token(self, authorization: Optional[str]) -> None:
         if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
         token = authorization.split(" ", 1)[1].strip()
         if not token.startswith("mock-"):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-    def create_workflow(self, authorization: Optional[str], name: str) -> WorkflowMinimal:
+    def create_workflow(self, authorization: Optional[str], req: WorkflowCreate) -> WorkflowMinimal:
         self._validate_token(authorization)
-        item = self._repo.create(name=name)
+        item = self._repo.create(name=req.name, definition=req.definition)
         return WorkflowMinimal(id=item.id, status=item.status)
 
     def get_workflow_status(self, authorization: Optional[str], wid: str) -> WorkflowMinimal:
@@ -361,7 +373,6 @@ class AuthProxy:
     def list_workflows(self, authorization: Optional[str]) -> List[WorkflowItem]:
         self._validate_token(authorization)
         return self._repo.list()
-
 
 proxy = AuthProxy(_repo)
 
@@ -387,7 +398,7 @@ def login(payload: LoginRequest) -> LoginResponse:
 
 @app.post("/workflow", response_model=WorkflowMinimal, status_code=status.HTTP_201_CREATED, tags=["workflows"])
 def create_workflow(req: WorkflowCreate, authorization: Optional[str] = Header(default=None)) -> WorkflowMinimal:
-    return proxy.create_workflow(authorization=authorization, name=req.name)
+    return proxy.create_workflow(authorization=authorization, req=req)
 
 
 @app.get("/workflows/{id}/status", response_model=WorkflowMinimal, tags=["workflows"])
@@ -404,8 +415,7 @@ def list_workflows(authorization: Optional[str] = Header(default=None)) -> List[
 
 @app.post("/ia/suggestion", response_model=IASuggestionResponse, tags=["ia"])
 def ia_suggestion(
-    payload: IASuggestionRequest,
-    authorization: Optional[str] = Header(None, alias="Authorization"),
+    payload: IASuggestionRequest, authorization: Optional[str] = Header(None, alias="Authorization")
 ) -> IASuggestionResponse:
     """
     Devuelve sugerencias generadas por el agente IA (mock por ahora).
@@ -494,6 +504,32 @@ def ia_fix(payload: IAFixRequest, authorization: Optional[str] = Header(None, al
         )
         rationale_notes.append("Se agregó paso de salida (Mock Notification).")
 
+    # La lógica de reordenamiento debe ocurrir después de cualquier adición de nodos
+    # para operar sobre la lista de pasos más actualizada.
+    # Esta lógica ahora es independiente de si se agregó un nodo o no.
+    reorder_and_log_changes(patched_definition, original_definition, changes_list, rationale_notes)
+
+    final_rationale = ". ".join(rationale_notes) if rationale_notes else "Correcciones aplicadas."
+    final_confidence = 0.9  # Default confidence, could be dynamic based on changes
+
+    return IAFixResponse(
+        patched_definition=patched_definition,
+        changes=changes_list,
+        rationale=final_rationale,
+        confidence=final_confidence,
+    )
+
+
+def reorder_and_log_changes(
+    patched_definition: Dict[str, Any],
+    original_definition: Dict[str, Any],
+    changes_list: List[IAFixChangeItem],
+    rationale_notes: List[str],
+) -> None:
+    """
+    Función auxiliar para reordenar pasos y registrar los cambios.
+    Mueve 'Validate CSV File' antes de 'Simple Transform' si es necesario.
+    """
     # 3. test_ia_fix_reorders_validate_before_transform: Reorder Validate CSV File before Simple Transform
     steps_list = patched_definition.get("steps", [])
     steps_types = [s.get("type") for s in steps_list]
@@ -536,8 +572,7 @@ def ia_fix(payload: IAFixRequest, authorization: Optional[str] = Header(None, al
 
 @app.post("/ia/estimate", response_model=IAEstimateResponse, tags=["ia"])
 def ia_estimate(
-    payload: IAEstimateRequest,
-    authorization: Optional[str] = Header(None, alias="Authorization"),
+    payload: IAEstimateRequest, authorization: Optional[str] = Header(None, alias="Authorization")
 ) -> IAEstimateResponse:
     """
     Devuelve una estimación de tiempo y costo del workflow (mock por ahora).
