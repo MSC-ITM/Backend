@@ -28,8 +28,8 @@ def swap_repo_to_sqlmodel(engine):
     Intercambia el repositorio global _repo de la app por SQLiteWorkflowRepo
     y reconstruye el proxy para que use el nuevo repo.
     """
-    import main
-    from main import SQLiteWorkflowRepo, AuthProxy
+    from src import main
+    from src.main import SQLiteWorkflowRepo, AuthProxy
 
     sql_repo = SQLiteWorkflowRepo(engine=engine)
     sql_repo.create_schema()

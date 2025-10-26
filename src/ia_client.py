@@ -1,8 +1,24 @@
 # src/ia_client.py
+"""
+Cliente de IA mejorado con arquitectura extensible.
+
+Integra:
+- Strategy Pattern: Múltiples proveedores de IA (Mock, OpenAI)
+- Command Pattern: Operaciones de fix estructuradas
+- Observer Pattern: Notificaciones de eventos
+- Servicios: Optimización de rutas y predicción de costos
+"""
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Union, cast
+
+# Importar componentes de la nueva arquitectura
+from .ia.factory import IAProviderFactory
+from .ia.providers import IAProviderStrategy
+from .ia.commands import FixCommandInvoker, FixCommandFactory
+from .ia.observers import WorkflowSubject, LogObserver, MetricsObserver
+from .ia.services import RouteOptimizer, CostPredictor
 
 # --------------------------------------------------------------------------------------
 # Patrón Singleton vía getter:
@@ -30,25 +46,50 @@ def get_ia_client() -> "IAClient":
 
 class IAClient:
     """
-    Cliente de IA placeholder.
+    Cliente de IA mejorado con arquitectura extensible.
+
+    Integra todos los patrones de diseño y servicios de IA:
+    - Strategy Pattern para proveedores intercambiables
+    - Command Pattern para operaciones de fix
+    - Observer Pattern para monitoreo
+    - Servicios de optimización y predicción
 
     Responsabilidades:
-    - Ofrecer una interfaz estable para sugerencia, fix y estimación.
-    - Mantener respuestas determinísticas durante pruebas.
-    - Encapsular la dependencia externa futura (modelo/servicio real).
-
-    Sustitución futura:
-    - Reemplazar las implementaciones de suggest(), fix() y estimate()
-      por llamadas reales al motor elegido, conservando la firma.
+    - Ofrecer una interfaz estable para sugerencia, fix y estimación
+    - Coordinar entre diferentes componentes de IA
+    - Mantener compatibilidad con tests existentes
     """
 
     # Valores fijos para mantener determinismo en los mocks.
     _DEFAULT_CONFIDENCE = 0.66
     _DEFAULT_TIMEOUT_SEC = 30
 
+    def __init__(self, provider: Optional[IAProviderStrategy] = None):
+        """
+        Inicializa el cliente de IA.
+
+        Args:
+            provider: Proveedor de IA a usar. Si es None, se crea desde configuración.
+        """
+        # Proveedor de IA (Strategy Pattern)
+        self.provider = provider or IAProviderFactory.create_from_config()
+
+        # Subject para notificaciones (Observer Pattern)
+        self.subject = WorkflowSubject()
+
+        # Observadores por defecto
+        self.log_observer = LogObserver(verbose=False)
+        self.metrics_observer = MetricsObserver()
+        self.subject.attach(self.log_observer)
+        self.subject.attach(self.metrics_observer)
+
+        # Servicios
+        self.route_optimizer = RouteOptimizer()
+        self.cost_predictor = CostPredictor()
+
     def suggest(self, definition: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Retorna un conjunto mínimo de sugerencias determinísticas.
+        Genera sugerencias para mejorar el workflow usando el proveedor configurado.
 
         Contrato mínimo:
         {
@@ -56,43 +97,25 @@ class IAClient:
           "confidence": float in [0,1],
           "rationale": str
         }
+
+        Raises:
+            Exception: Si el proveedor falla después de todos los reintentos
         """
-        # Heurística neutra y estable para el mock.
-        suggestions: List[Dict[str, Any]] = []
+        # Delegar al proveedor (Strategy Pattern)
+        result = self.provider.suggest(definition)
 
-        # Ejemplo de sugerencia genérica para GET sin timeout.
-        for idx, step in enumerate(definition.get("steps", [])):
-            if step.get("type") == "HTTPS GET Request":
-                args = step.get("args", {}) or {}
-                if "timeout" not in args:
-                    suggestions.append(
-                        {
-                            "op": "add_arg",
-                            "target_step_index": idx,
-                            "arg": {"timeout": self._DEFAULT_TIMEOUT_SEC},
-                            "reason": "Definir timeout para tráfico HTTP predecible.",
-                        }
-                    )
+        # Notificar a observadores
+        workflow_id = definition.get("name", "unknown")
+        self.subject.notify_suggestion(
+            workflow_id=workflow_id,
+            suggestions=result.get("suggested_changes", [])
+        )
 
-        # Si no hay salida, sugerir notificación mock (solo como demostración).
-        if not any(s.get("type") in ("Save to Database", "Mock Notification") for s in definition.get("steps", [])):
-            suggestions.append(
-                {
-                    "op": "append_step",
-                    "step": {"type": "Mock Notification", "args": {"channel": "log"}},
-                    "reason": "Asegurar un paso de salida para observabilidad.",
-                }
-            )
-
-        return {
-            "suggested_changes": suggestions,
-            "confidence": self._DEFAULT_CONFIDENCE,
-            "rationale": "Sugerencias básicas para robustez (timeout) y salida observable.",
-        }
+        return result
 
     def fix(self, definition: Dict[str, Any], logs: Union[str, List[str], None]) -> Dict[str, Any]:
         """
-        Devuelve una definición parcheada y notas.
+        Aplica correcciones al workflow usando el proveedor de IA.
 
         Contrato mínimo:
         {
@@ -100,90 +123,72 @@ class IAClient:
           "notes": [str, ...]
         }
 
-        Reglas determinísticas (mock):
-        - Normalizar logs a lista de strings.
-        - Asegurar 'timeout' en pasos HTTPS GET Request si falta.
-        - Si no hay paso de salida (Save/Notification), agregar Mock Notification.
+        Raises:
+            Exception: Si el proveedor falla después de todos los reintentos
         """
-        patched = deepcopy(definition)
-        notes: List[str] = []
+        # Usar el proveedor de IA
+        result = self.provider.fix(definition, logs)
 
-        # Normalización de logs
-        norm_logs: List[str]
-        if logs is None:
-            norm_logs = []
-        elif isinstance(logs, str):
-            norm_logs = [logs]
-        else:
-            # Forzar a lista de str
-            norm_logs = [str(x) for x in logs]
+        # Notificar a observadores
+        workflow_id = definition.get("name", "unknown")
+        self.subject.notify_fix(
+            workflow_id=workflow_id,
+            changes=result.get("notes", [])
+        )
 
-        # Timeout para GET si falta
-        for step in patched.get("steps", []):
-            if step.get("type") == "HTTPS GET Request":
-                args = cast(Dict[str, Any], step.setdefault("args", {}))
-                if "timeout" not in args:
-                    args["timeout"] = self._DEFAULT_TIMEOUT_SEC
-                    notes.append("Se agregó timeout a HTTPS GET Request.")
-
-        # Asegurar salida
-        has_output = any(s.get("type") in ("Save to Database", "Mock Notification") for s in patched.get("steps", []))
-        if not has_output:
-            patched.setdefault("steps", []).append(
-                {"type": "Mock Notification", "args": {"channel": "log"}}
-            )
-            notes.append("Se agregó paso de salida (Mock Notification).")
-
-        # Anotar que se leyeron logs (aunque el mock no aplique cambios por contenido)
-        if norm_logs:
-            notes.append(f"Se procesaron {len(norm_logs)} líneas de logs.")
-
-        return {
-            "patched_definition": patched,
-            "notes": notes,
-        }
+        return result
 
     def estimate(self, definition: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Retorna una estimación determinística basada en conteo de pasos y un costo fijo por tipo.
+        Estima tiempo, costo y complejidad usando el proveedor de IA.
 
         Contrato mínimo:
         {
           "estimated_time_seconds": int,
           "estimated_cost_usd": float,
-          "assumptions": [str, ...]
+          "complexity_score": float,
+          "breakdown": List[Dict],
+          "assumptions": [str, ...],
+          "confidence": float
         }
+
+        Raises:
+            Exception: Si el proveedor falla después de todos los reintentos
         """
-        steps: List[Dict[str, Any]] = list(definition.get("steps", []))
+        # Usar el proveedor de IA
+        result = self.provider.estimate(definition)
 
-        # Pesos determinísticos por tipo (mock).
-        time_per_type = {
-            "HTTPS GET Request": 2,
-            "Validate CSV File": 1,
-            "Simple Transform": 1,
-            "Save to Database": 2,
-            "Mock Notification": 0,
-        }
-        cost_per_type = {
-            "HTTPS GET Request": 0.0005,
-            "Validate CSV File": 0.0002,
-            "Simple Transform": 0.0002,
-            "Save to Database": 0.0005,
-            "Mock Notification": 0.0,
-        }
+        # Notificar a observadores
+        workflow_id = definition.get("name", "unknown")
+        self.subject.notify_estimate(
+            workflow_id=workflow_id,
+            estimate_data=result
+        )
 
-        est_time = 0
-        est_cost = 0.0
-        for s in steps:
-            t = s.get("type", "")
-            est_time += time_per_type.get(t, 1)  # valor por defecto estable
-            est_cost += cost_per_type.get(t, 0.0001)
+        return result
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Retorna métricas recopiladas por el observer."""
+        return self.metrics_observer.get_metrics()
+
+    def get_logs(self) -> List[Dict[str, Any]]:
+        """Retorna logs recopilados por el observer."""
+        return self.log_observer.get_logs()
+
+    def optimize_workflow(self, definition: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Optimiza el workflow usando el servicio de optimización de rutas.
+
+        Args:
+            definition: Definición del workflow a optimizar
+
+        Returns:
+            Dict con definición optimizada y reporte de optimizaciones
+        """
+        optimized = self.route_optimizer.optimize(definition)
+        report = self.route_optimizer.get_optimization_report()
 
         return {
-            "estimated_time_seconds": int(est_time),
-            "estimated_cost_usd": float(round(est_cost, 6)),
-            "assumptions": [
-                "Estimación basada en reglas determinísticas por tipo de paso.",
-                "No incluye latencias de red ni costos externos.",
-            ],
+            "optimized_definition": optimized,
+            "optimization_report": report
         }

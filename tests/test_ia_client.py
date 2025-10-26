@@ -8,7 +8,7 @@ def test_getter_returns_singleton_instance(monkeypatch):
     El getter debe devolver siempre la MISMA instancia (patrón Singleton).
     """
     # Cargamos el módulo bajo prueba
-    ia_mod = importlib.import_module("ia_client")
+    ia_mod = importlib.import_module("src.ia_client")
 
     # Reset interno para no depender de orden de ejecución en otros tests
     if hasattr(ia_mod, "_instance"):
@@ -24,7 +24,7 @@ def test_suggest_contract_minimum(monkeypatch):
     suggest() debe devolver un contrato estable y determinístico
     útil para el Frontend y el Worker durante el mock.
     """
-    ia_mod = importlib.import_module("ia_client")
+    ia_mod = importlib.import_module("src.ia_client")
     client = ia_mod.get_ia_client()
 
     definition = {"steps": [{"type": "HTTPS GET Request", "args": {"url": "https://x"}}]}
@@ -43,7 +43,7 @@ def test_fix_contract_minimum_accepts_logs_str_or_list(monkeypatch):
     fix() debe aceptar logs como str o list[str] y normalizar internamente.
     Debe devolver una definición parcheada y notas.
     """
-    ia_mod = importlib.import_module("ia_client")
+    ia_mod = importlib.import_module("src.ia_client")
     client = ia_mod.get_ia_client()
 
     definition = {"steps": [{"type": "Validate CSV File", "args": {"delimiter": ","}}]}
@@ -61,7 +61,7 @@ def test_estimate_contract_minimum(monkeypatch):
     """
     estimate() debe devolver tiempos y costo aproximado determinísticos en el mock.
     """
-    ia_mod = importlib.import_module("ia_client")
+    ia_mod = importlib.import_module("src.ia_client")
     client = ia_mod.get_ia_client()
 
     definition = {
