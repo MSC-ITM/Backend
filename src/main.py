@@ -1,18 +1,51 @@
 # src/main.py
+# Updated to support flexible authentication
+
+# Cargar variables de entorno desde .env
+from dotenv import load_dotenv
+load_dotenv()
+
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, status, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field
 from copy import deepcopy
 from math import exp
 import json
 from datetime import datetime, UTC
-from sqlmodel import SQLModel, Field as SQLField, Session, select, create_engine
+from sqlmodel import SQLModel, Field as SQLField, Session, select
+import json
 from . import ia_client
+from typing import Optional
 
 
 app = FastAPI(title="Workflow API", version="0.1.0")
+
+# Security scheme for Swagger UI
+security = HTTPBearer(auto_error=False)
+
+# Función auxiliar para validar token
+async def validate_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+) -> str:
+    """
+    Valida que el token sea válido (empiece con 'mock-').
+    Compatible con Swagger UI (HTTPBearer) y peticiones directas con Authorization header.
+    Retorna el token si es válido, sino lanza excepción 401.
+    """
+    # Si no hay credenciales, error 401
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = credentials.credentials
+
+    # Validar que el token empiece con "mock-"
+    if not token.startswith("mock-"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return token
 
 
 # ---------------------------- Modelos API ----------------------------
@@ -414,179 +447,138 @@ def list_workflows(authorization: Optional[str] = Header(default=None)) -> List[
 # ------------------------- Endpoint IA -------------------------
 
 @app.post("/ia/suggestion", response_model=IASuggestionResponse, tags=["ia"])
-def ia_suggestion(
-    payload: IASuggestionRequest, authorization: Optional[str] = Header(None, alias="Authorization")
+async def ia_suggestion(
+    payload: IASuggestionRequest,
+    token: str = Depends(validate_token),
 ) -> IASuggestionResponse:
     """
-    Devuelve sugerencias generadas por el agente IA (mock por ahora).
+    Devuelve sugerencias generadas por el agente IA usando Gemini.
+
+    Raises:
+        HTTPException: 500 si la API de IA falla después de 3 reintentos
     """
-    if not authorization or not authorization.startswith("Bearer mock-"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        client = ia_client.get_ia_client()
+        result = client.suggest(payload.definition)
 
-    client = ia_client.get_ia_client()
-    result = client.suggest(payload.definition)
-
-    # Mapeo de la respuesta del cliente mock al modelo de respuesta de la API
-    suggestions_list = []
-    for change in result.get("suggested_changes", []):
-        suggestions_list.append(
-            IASuggestionItem(
-                kind=change.get("op", "unknown"),
-                # Asumimos que el mock puede no dar todos los campos
-                path=f"steps[{change.get('target_step_index', -1)}]",
-                message=change.get("reason", "No message provided."),
-                confidence=0.5,  # Default confidence
-                detail={"arg_name": change.get("arg_name"), "arg_value": change.get("arg_value")},
+        # Mapeo de la respuesta del cliente al modelo de respuesta de la API
+        suggestions_list = []
+        for change in result.get("suggested_changes", []):
+            suggestions_list.append(
+                IASuggestionItem(
+                    kind=change.get("op", "unknown"),
+                    path=f"steps[{change.get('target_step_index', -1)}]",
+                    message=change.get("reason", "No message provided."),
+                    confidence=0.5,
+                    detail={"arg_name": change.get("arg_name"), "arg_value": change.get("arg_value")},
+                )
             )
-        )
 
-    return IASuggestionResponse(
-        suggestions=suggestions_list,
-        rationale=result.get("rationale", ""),
-        confidence=result.get("confidence", 0.0),
-    )
+        return IASuggestionResponse(
+            suggestions=suggestions_list,
+            rationale=result.get("rationale", ""),
+            confidence=result.get("confidence", 0.0),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener sugerencias de la API de IA después de múltiples intentos: {str(e)}"
+        )
 
 
 @app.post("/ia/fix", response_model=IAFixResponse, tags=["ia"])
-def ia_fix(payload: IAFixRequest, authorization: Optional[str] = Header(None, alias="Authorization")) -> IAFixResponse:
+async def ia_fix(
+    payload: IAFixRequest,
+    token: str = Depends(validate_token),
+) -> IAFixResponse:
     """
-    Devuelve una versión corregida del workflow según los logs (mock por ahora).
+    Devuelve una versión corregida del workflow usando Gemini.
+
+    Raises:
+        HTTPException: 500 si la API de IA falla después de 3 reintentos
     """
-    if not authorization or not authorization.startswith("Bearer mock-"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        client = ia_client.get_ia_client()
+        result = client.fix(payload.definition, payload.logs)
 
-    # For now, we'll implement the fixing logic directly in the endpoint
-    # to match test expectations, assuming ia_client.fix is a very basic mock
-    # or its output is to be overridden/enhanced by this logic.
-
-    original_definition = deepcopy(payload.definition)
-    patched_definition = deepcopy(payload.definition)
-    changes_list: List[IAFixChangeItem] = []
-    rationale_notes: List[str] = []
-
-    # --- Fixing Logic ---
-
-    # 1. test_ia_fix_sets_timeout_if_missing: Add timeout=10 to HTTPS GET Request
-    for i, step in enumerate(patched_definition.get("steps", [])):
-        if step.get("type") == "HTTPS GET Request":
-            if "args" not in step:
-                step["args"] = {}
-            if "timeout" not in step["args"]:
-                step["args"]["timeout"] = 10  # Test expects 10
+        # Mapear la respuesta del cliente al modelo de respuesta de la API
+        changes_list = []
+        for note in result.get("notes", []):
+            # Parsear las notas para crear cambios estructurados
+            if "timeout" in note.lower():
                 changes_list.append(
                     IAFixChangeItem(
                         kind="parameter_set",
-                        path=f"steps[{i}].args.timeout",
-                        message="Se estableció timeout=10 en HTTPS GET Request.",
-                        detail={"param": "timeout", "value": 10},
+                        path="steps[*].args.timeout",
+                        message=note,
+                        detail={"param": "timeout", "value": 10}
                     )
                 )
-                rationale_notes.append("Se agregó timeout=10 al paso HTTPS GET Request.")
-            break  # Assume only one such step for simplicity of this fix
+            elif "salida" in note.lower() or "notification" in note.lower():
+                changes_list.append(
+                    IAFixChangeItem(
+                        kind="add_node",
+                        path="steps[-1]",
+                        message=note,
+                        detail={"node": {"type": "Mock Notification"}}
+                    )
+                )
+            elif "reorden" in note.lower():
+                changes_list.append(
+                    IAFixChangeItem(
+                        kind="reorder_nodes",
+                        path="steps",
+                        message=note,
+                        detail={}
+                    )
+                )
+            else:
+                changes_list.append(
+                    IAFixChangeItem(
+                        kind="parameter_set",
+                        path="unknown",
+                        message=note,
+                        detail={}
+                    )
+                )
 
-    # 2. test_ia_fix_adds_output_if_missing: Add an output node if missing
-    has_output_node = any(
-        s.get("type") in ("Save to Database", "Mock Notification")
-        for s in patched_definition.get("steps", [])
-    )
-    if not has_output_node:
-        new_output_step = {"type": "Mock Notification", "args": {"channel": "log"}}
-        if "steps" not in patched_definition:
-            patched_definition["steps"] = []
-        patched_definition["steps"].append(new_output_step)
-        changes_list.append(
-            IAFixChangeItem(
-                kind="add_node",
-                path=f"steps[{len(patched_definition['steps']) - 1}]",
-                message="Se agregó paso de salida (Mock Notification).",
-                detail={"node": new_output_step, "position": len(patched_definition['steps']) - 1},
-            )
+        return IAFixResponse(
+            patched_definition=result.get("patched_definition", payload.definition),
+            changes=changes_list,
+            rationale=". ".join(result.get("notes", [])) if result.get("notes") else "Correcciones aplicadas por IA.",
+            confidence=0.9,
         )
-        rationale_notes.append("Se agregó paso de salida (Mock Notification).")
-
-    # La lógica de reordenamiento debe ocurrir después de cualquier adición de nodos
-    # para operar sobre la lista de pasos más actualizada.
-    # Esta lógica ahora es independiente de si se agregó un nodo o no.
-    reorder_and_log_changes(patched_definition, original_definition, changes_list, rationale_notes)
-
-    final_rationale = ". ".join(rationale_notes) if rationale_notes else "Correcciones aplicadas."
-    final_confidence = 0.9  # Default confidence, could be dynamic based on changes
-
-    return IAFixResponse(
-        patched_definition=patched_definition,
-        changes=changes_list,
-        rationale=final_rationale,
-        confidence=final_confidence,
-    )
-
-
-def reorder_and_log_changes(
-    patched_definition: Dict[str, Any],
-    original_definition: Dict[str, Any],
-    changes_list: List[IAFixChangeItem],
-    rationale_notes: List[str],
-) -> None:
-    """
-    Función auxiliar para reordenar pasos y registrar los cambios.
-    Mueve 'Validate CSV File' antes de 'Simple Transform' si es necesario.
-    """
-    # 3. test_ia_fix_reorders_validate_before_transform: Reorder Validate CSV File before Simple Transform
-    steps_list = patched_definition.get("steps", [])
-    steps_types = [s.get("type") for s in steps_list]
-    
-    validate_idx = -1
-    transform_idx = -1
-    
-    for i, t in enumerate(steps_types):
-        if t == "Validate CSV File":
-            validate_idx = i
-        elif t == "Simple Transform":
-            transform_idx = i
-    
-    if validate_idx != -1 and transform_idx != -1 and validate_idx > transform_idx:
-        # Perform reordering
-        temp_steps = deepcopy(steps_list)
-        validate_step = temp_steps.pop(validate_idx)
-        temp_steps.insert(transform_idx, validate_step)
-        patched_definition["steps"] = temp_steps
-        changes_list.append(
-            IAFixChangeItem(
-                kind="reorder_nodes",
-                path="steps",
-                message="Se reordenó 'Validate CSV File' antes de 'Simple Transform'.",
-                detail={"old_order_types": [s.get("type") for s in original_definition.get("steps", [])], "new_order_types": [s.get("type") for s in patched_definition.get("steps", [])]},
-            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener correcciones de la API de IA después de múltiples intentos: {str(e)}"
         )
-        rationale_notes.append("Se reordenaron los pasos de validación y transformación.")
-
-    final_rationale = ". ".join(rationale_notes) if rationale_notes else "Correcciones aplicadas."
-    final_confidence = 0.9  # Default confidence, could be dynamic based on changes
-
-    return IAFixResponse(
-        patched_definition=patched_definition,
-        changes=changes_list,
-        rationale=final_rationale,
-        confidence=final_confidence,
-    )
 
 
 @app.post("/ia/estimate", response_model=IAEstimateResponse, tags=["ia"])
-def ia_estimate(
-    payload: IAEstimateRequest, authorization: Optional[str] = Header(None, alias="Authorization")
+async def ia_estimate(
+    payload: IAEstimateRequest,
+    token: str = Depends(validate_token),
 ) -> IAEstimateResponse:
     """
-    Devuelve una estimación de tiempo y costo del workflow (mock por ahora).
-    """
-    if not authorization or not authorization.startswith("Bearer mock-"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    Devuelve una estimación de tiempo y costo del workflow usando Gemini.
 
-    client = ia_client.get_ia_client()
-    result = client.estimate(payload.definition)
-    return IAEstimateResponse(
-        estimated_runtime_seconds=result.get("estimated_time_seconds", 0.0),
-        estimated_cost=result.get("estimated_cost_usd", 0.0),
-        complexity_score=result.get("complexity_score", 0.0),
-        breakdown=result.get("breakdown", []),
-        rationale=result.get("assumptions", [""])[0] if result.get("assumptions") else "",
-        confidence=result.get("confidence", 0.0),
-    )
+    Raises:
+        HTTPException: 500 si la API de IA falla después de 3 reintentos
+    """
+    try:
+        client = ia_client.get_ia_client()
+        result = client.estimate(payload.definition)
+        return IAEstimateResponse(
+            estimated_runtime_seconds=result.get("estimated_time_seconds", 0.0),
+            estimated_cost=result.get("estimated_cost_usd", 0.0),
+            complexity_score=result.get("complexity_score", 0.0),
+            breakdown=result.get("breakdown", []),
+            rationale=result.get("assumptions", [""])[0] if result.get("assumptions") else "",
+            confidence=result.get("confidence", 0.0),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener estimación de la API de IA después de múltiples intentos: {str(e)}"
+        )

@@ -11,7 +11,7 @@ from sqlmodel import create_engine
 from sqlalchemy.pool import StaticPool
 
 # Importa los tipos/contratos del módulo principal.
-from main import SQLiteWorkflowRepo, WorkflowItem  # noqa: E402
+from src.main import SQLiteWorkflowRepo, WorkflowItem  # noqa: E402
 
 UUID_RE = r"^[0-9a-fA-F-]{36}$"
 

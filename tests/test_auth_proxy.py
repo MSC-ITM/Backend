@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 # Clases importadas del módulo principal para conservar el contrato.
-from main import AuthProxy, WorkflowItem  # noqa: E402
+from src.main import AuthProxy, WorkflowItem  # noqa: E402
 
 
 class FakeRepo:

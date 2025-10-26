@@ -7,11 +7,11 @@ from fastapi.testclient import TestClient
 # Añade `src/` al sys.path para permitir la importación del módulo de aplicación.
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # Importa la instancia de aplicación FastAPI expuesta por el módulo principal.
-from main import app  # noqa: E402
+from src.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="module")
