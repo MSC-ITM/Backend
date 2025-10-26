@@ -13,6 +13,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field
 from copy import deepcopy
 from math import exp
+import json
 from datetime import datetime, UTC
 from sqlmodel import SQLModel, Field as SQLField, Session, select
 import json
@@ -298,7 +299,7 @@ class InMemoryWorkflowRepo:
         return list(self._store.values())
 
 
-_repo = InMemoryWorkflowRepo()
+#_repo = InMemoryWorkflowRepo()
 
 
 # --------------------- Repositorio SQLModel ---------------------
@@ -325,7 +326,7 @@ class SQLiteWorkflowRepo:
             record = WorkflowTable(
                 id=wid,
                 name=name,
-                status="en_progreso",
+                status="en_espera",
                 created_at=now,
                 definition=json.dumps(definition or {}),
             )
@@ -361,25 +362,38 @@ class SQLiteWorkflowRepo:
                 for r in records
             ]
 
+# --- Creación del motor y repositorio ---
+# Usar una base de datos en archivo para persistencia entre reinicios.
+sqlite_file_name = "database.db"
+sqlite_url = f"sqlite:///{sqlite_file_name}"
+
+# connect_args es necesario para SQLite para permitir uso en múltiples hilos (como hace FastAPI)
+engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
+
+_repo = SQLiteWorkflowRepo(engine=engine)
+
+# Asegurarse de que la tabla exista al iniciar la app
+_repo.create_schema()
+
 
 # ----------------------------- Proxy -----------------------------
 
 class AuthProxy:
     """Proxy de autenticación que valida el token y delega operaciones al repositorio."""
 
-    def __init__(self, repo: InMemoryWorkflowRepo) -> None:
+    def __init__(self, repo: SQLiteWorkflowRepo) -> None:
         self._repo = repo
 
     def _validate_token(self, authorization: Optional[str]) -> None:
         if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
         token = authorization.split(" ", 1)[1].strip()
         if not token.startswith("mock-"):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-    def create_workflow(self, authorization: Optional[str], name: str) -> WorkflowMinimal:
+    def create_workflow(self, authorization: Optional[str], req: WorkflowCreate) -> WorkflowMinimal:
         self._validate_token(authorization)
-        item = self._repo.create(name=name)
+        item = self._repo.create(name=req.name, definition=req.definition)
         return WorkflowMinimal(id=item.id, status=item.status)
 
     def get_workflow_status(self, authorization: Optional[str], wid: str) -> WorkflowMinimal:
@@ -392,7 +406,6 @@ class AuthProxy:
     def list_workflows(self, authorization: Optional[str]) -> List[WorkflowItem]:
         self._validate_token(authorization)
         return self._repo.list()
-
 
 proxy = AuthProxy(_repo)
 
@@ -418,7 +431,7 @@ def login(payload: LoginRequest) -> LoginResponse:
 
 @app.post("/workflow", response_model=WorkflowMinimal, status_code=status.HTTP_201_CREATED, tags=["workflows"])
 def create_workflow(req: WorkflowCreate, authorization: Optional[str] = Header(default=None)) -> WorkflowMinimal:
-    return proxy.create_workflow(authorization=authorization, name=req.name)
+    return proxy.create_workflow(authorization=authorization, req=req)
 
 
 @app.get("/workflows/{id}/status", response_model=WorkflowMinimal, tags=["workflows"])
