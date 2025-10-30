@@ -19,7 +19,7 @@ from sqlmodel import SQLModel, Field as SQLField, Session, select
 import json
 from . import ia_client
 from typing import Optional
-
+from sqlmodel import create_engine
 
 app = FastAPI(title="Workflow API", version="0.1.0")
 

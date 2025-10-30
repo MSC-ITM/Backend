@@ -30,3 +30,6 @@ htmlcov/
 logs/
 
 src/__pycache__/
+
+#DB
+database.db
