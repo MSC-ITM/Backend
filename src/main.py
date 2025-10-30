@@ -107,6 +107,7 @@ class WorkflowTable(SQLModel, table=True):
     name: str
     status: str
     created_at: str
+    updated_at: Optional[str] = None
     definition: Optional[str] = None  # JSON serializado como TEXT
 
 
@@ -328,6 +329,7 @@ class SQLiteWorkflowRepo:
                 name=name,
                 status="en_espera",
                 created_at=now,
+                updated_at=now,
                 definition=json.dumps(definition or {}),
             )
             session.add(record)
