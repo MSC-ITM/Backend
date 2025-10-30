@@ -332,7 +332,7 @@ class SQLiteWorkflowRepo:
             )
             session.add(record)
             session.commit()
-        return WorkflowItem(id=wid, name=name, status="en_progreso", created_at=now)
+        return WorkflowItem(id=wid, name=name, status="en_espera", created_at=now)
 
     def get(self, wid: str) -> Optional[WorkflowItem]:
         """Obtiene un workflow por ID, o None si no existe."""
