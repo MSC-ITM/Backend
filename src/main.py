@@ -1,452 +1,341 @@
-# src/main.py
-# Updated to support flexible authentication
+"""
+Integrated Backend API
+Connects Frontend (Steps+Edges format) with Worker (Nodes+depends_on format)
+"""
 
-# Cargar variables de entorno desde .env
 from dotenv import load_dotenv
 load_dotenv()
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
-from fastapi import FastAPI, Header, HTTPException, status, Depends, Security
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, ConfigDict, Field
-from copy import deepcopy
-from math import exp
-import json
+import os
 from datetime import datetime, UTC
-from sqlmodel import SQLModel, Field as SQLField, Session, select
-import json
-from . import ia_client
-from typing import Optional
+from typing import List, Optional
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import create_engine
 
-app = FastAPI(title="Workflow API", version="0.1.0")
+# Import our models
+from .models import (
+    # Auth models
+    LoginRequest,
+    LoginResponse,
+    UserInfo,
+    # Task Types
+    TaskType,
+    # Workflows
+    Workflow,
+    WorkflowListItem,
+    WorkflowDetailDTO,
+    CreateWorkflowDTO,
+    UpdateWorkflowDTO,
+    # Runs
+    Run,
+    RunDetailDTO,
+    LogEntry,
+    GetLogsOptions,
+    # IA models
+    IASuggestionRequest,
+    IASuggestionResponse,
+    IASuggestionItem,
+    IAFixRequest,
+    IAFixResponse,
+    IAFixChangeItem,
+    IAEstimateRequest,
+    IAEstimateResponse,
+    IAEstimateBreakdownItem,
+)
 
-# Security scheme for Swagger UI
+from .repository import WorkflowRepository
+from . import ia_client
+
+
+# ============================================================================
+# App Configuration
+# ============================================================================
+
+app = FastAPI(
+    title="Workflow Orchestration API",
+    version="1.0.0",
+    description="Integrated Backend API for Frontend and Worker communication"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Security
 security = HTTPBearer(auto_error=False)
 
-# Función auxiliar para validar token
+
+# ============================================================================
+# Database Configuration (Shared with Worker)
+# ============================================================================
+
+# Use Worker's database path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+DB_PATH = os.path.join(PROJECT_ROOT, "data", "workflows.db")
+
+# Ensure data directory exists
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+DATABASE_URL = f"sqlite:///{DB_PATH}"
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    echo=False  # Set to True for SQL debugging
+)
+
+# Initialize repository
+repo = WorkflowRepository(engine)
+repo.create_schema()
+
+print(f"[Backend] Using shared database: {DB_PATH}")
+
+
+# ============================================================================
+# Authentication
+# ============================================================================
+
 async def validate_token(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
 ) -> str:
     """
-    Valida que el token sea válido (empiece con 'mock-').
-    Compatible con Swagger UI (HTTPBearer) y peticiones directas con Authorization header.
-    Retorna el token si es válido, sino lanza excepción 401.
+    Validate bearer token.
+    For demo: accepts tokens starting with 'mock-'
     """
-    # Si no hay credenciales, error 401
     if not credentials:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     token = credentials.credentials
 
-    # Validar que el token empiece con "mock-"
     if not token.startswith("mock-"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     return token
 
 
-# ---------------------------- Modelos API ----------------------------
-
-class LoginRequest(BaseModel):
-    username: str = Field(..., json_schema_extra={"example": "demo"})
-    password: str = Field(..., json_schema_extra={"example": "demo123"})
-
-
-class UserInfo(BaseModel):
-    id: str = Field(..., json_schema_extra={"example": "c6c0a7b5-2f9c-4b45-b5b4-5f1e6d3b2f9a"})
-    name: str = Field(..., json_schema_extra={"example": "Demo User"})
-
-
-class LoginResponse(BaseModel):
-    access_token: str = Field(..., json_schema_extra={"example": "mock-abcdef123"})
-    token_type: str = Field(..., json_schema_extra={"example": "bearer"})
-    user: UserInfo
-
-
-class WorkflowCreate(BaseModel):
-    name: str = Field(..., json_schema_extra={"example": "etl-sencillo"})
-    definition: Dict[str, Any] = Field(
-        default_factory=dict,
-        json_schema_extra={"example": {"steps": [{"type": "HTTPS GET Request", "args": {"url": "https://..."}}]}},
-    )
-
-
-class WorkflowMinimal(BaseModel):
-    id: str = Field(..., json_schema_extra={"example": "5ca2f9e3-9bd8-4b6e-9b66-5a2d8e8f8c2a"})
-    status: str = Field(..., json_schema_extra={"example": "en_progreso"})
-
-
-class WorkflowItem(BaseModel):
-    id: str
-    name: str
-    status: str
-    created_at: str
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "id": "5ca2f9e3-9bd8-4b6e-9b66-5a2d8e8f8c2a",
-                "name": "etl-sencillo",
-                "status": "en_progreso",
-                "created_at": "2025-10-24T00:00:00Z",
-            }
-        }
-    )
-
-
-# -------------------- Modelo de tabla SQLModel --------------------
-
-class WorkflowTable(SQLModel, table=True):
-    """
-    Representa la tabla 'workflow' en SQLite. Guarda también la definición (JSON) para futuras funciones del worker.
-    """
-    id: str = SQLField(primary_key=True, index=True)
-    name: str
-    status: str
-    created_at: str
-    updated_at: Optional[str] = None
-    definition: Optional[str] = None  # JSON serializado como TEXT
-
-
-# ---------------------- Modelos IA (sugerencias) ----------------------
-
-class IASuggestionRequest(BaseModel):
-    name: str = Field(..., json_schema_extra={"example": "etl-sencillo"})
-    definition: Dict[str, Any] = Field(
-        ...,
-        json_schema_extra={
-            "example": {
-                "steps": [
-                    {"type": "HTTPS GET Request", "args": {"url": "https://ejemplo.com/data.csv"}},
-                    {"type": "Validate CSV File", "args": {"delimiter": ",", "columns": ["a", "b"]}},
-                    {"type": "Simple Transform", "args": {"op": "uppercase", "field": "a"}},
-                    {"type": "Save to Database", "args": {"table": "dest_tabla"}}
-                ]
-            }
-        },
-    )
-    goals: Optional[List[str]] = Field(
-        default=None,
-        json_schema_extra={"example": ["rápido", "barato"]},
-    )
-
-
-class IASuggestionItem(BaseModel):
-    kind: str = Field(..., json_schema_extra={"example": "add_node"})
-    path: str = Field(..., json_schema_extra={"example": "steps[3]"})
-    message: str = Field(..., json_schema_extra={"example": "Agregar nodo de salida 'Save to Database'."})
-    confidence: float = Field(..., json_schema_extra={"example": 0.7})
-    detail: Optional[Dict[str, Any]] = Field(
-        default=None,
-        json_schema_extra={
-            "example": {"node": {"type": "Save to Database", "args": {"table": "dest_tabla"}}, "position": 3}
-        },
-    )
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "kind": "parameter_hint",
-                "path": "steps[0]",
-                "message": "Configurar timeout en HTTPS GET Request.",
-                "confidence": 0.6,
-                "detail": {"hint": {"param": "timeout", "value": 10}},
-            }
-        }
-    )
-
-
-class IASuggestionResponse(BaseModel):
-    suggestions: List[IASuggestionItem]
-    rationale: str = Field(..., json_schema_extra={"example": "Reglas determinísticas básicas sobre orden y presencia de nodos."})
-    confidence: float = Field(..., json_schema_extra={"example": 0.8})
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "suggestions": [
-                    {
-                        "kind": "reorder_nodes",
-                        "path": "steps[2]",
-                        "message": "Mover 'Validate CSV File' antes de 'Simple Transform'.",
-                        "confidence": 0.75,
-                        "detail": {"new_order": [0, 1, 2, 3]},
-                    }
-                ],
-                "rationale": "Validar datos antes de transformar y asegurar nodo de salida.",
-                "confidence": 0.8,
-            }
-        }
-    )
-
-
-# ---------------------- Modelos IA (fix) ----------------------
-
-class IAFixRequest(BaseModel):
-    name: str = Field(..., json_schema_extra={"example": "etl-sencillo"})
-    definition: Dict[str, Any] = Field(
-        ...,
-        json_schema_extra={
-            "example": {
-                "steps": [
-                    {"type": "HTTPS GET Request", "args": {"url": "https://ejemplo.com/data.csv"}},
-                    {"type": "Simple Transform", "args": {"op": "uppercase", "field": "a"}}
-                ]
-            }
-        },
-    )
-    logs: Optional[str] = Field(default=None, json_schema_extra={"example": "Error en paso 2 ..."})
-
-
-class IAFixChangeItem(BaseModel):
-    kind: str = Field(..., json_schema_extra={"example": "parameter_set"})
-    path: str = Field(..., json_schema_extra={"example": "steps[0].args.timeout"})
-    message: str = Field(..., json_schema_extra={"example": "Se estableció timeout=10 en HTTPS GET Request."})
-    detail: Optional[Dict[str, Any]] = Field(
-        default=None,
-        json_schema_extra={"example": {"param": "timeout", "value": 10}},
-    )
-
-
-class IAFixResponse(BaseModel):
-    patched_definition: Dict[str, Any]
-    changes: List[IAFixChangeItem]
-    rationale: str = Field(..., json_schema_extra={"example": "Correcciones determinísticas básicas."})
-    confidence: float = Field(..., json_schema_extra={"example": 0.8})
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "patched_definition": {
-                    "steps": [
-                        {"type": "Validate CSV File", "args": {"delimiter": ",", "columns": ["a", "b"]}},
-                        {"type": "Simple Transform", "args": {"op": "uppercase", "field": "a"}},
-                        {"type": "Save to Database", "args": {"table": "dest_tabla"}}
-                    ]
-                },
-                "changes": [
-                    {"kind": "reorder_nodes", "path": "steps[1]", "message": "Reordenado Validate antes de Transform."},
-                    {"kind": "add_node", "path": "steps[2]", "message": "Agregado nodo de salida."}
-                ],
-                "rationale": "Asegurar validación previa y salida definida.",
-                "confidence": 0.8
-            }
-        }
-    )
-
-
-# ---------------------- Modelos IA (estimate) ----------------------
-
-class IAEstimateRequest(BaseModel):
-    name: str = Field(..., json_schema_extra={"example": "etl-sencillo"})
-    definition: Dict[str, Any] = Field(
-        ...,
-        json_schema_extra={
-            "example": {
-                "steps": [
-                    {"type": "HTTPS GET Request", "args": {"url": "https://ejemplo.com/data.csv"}},
-                    {"type": "Validate CSV File", "args": {"delimiter": ",", "columns": ["a", "b"]}},
-                    {"type": "Simple Transform", "args": {"op": "uppercase", "field": "a"}},
-                    {"type": "Save to Database", "args": {"table": "dest_tabla"}}
-                ]
-            }
-        },
-    )
-    goals: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["rápido", "barato"]})
-
-
-class IAEstimateBreakdownItem(BaseModel):
-    step_index: int = Field(..., json_schema_extra={"example": 0})
-    type: str = Field(..., json_schema_extra={"example": "HTTPS GET Request"})
-    time: float = Field(..., json_schema_extra={"example": 3.2})  # segundos
-    cost: float = Field(..., json_schema_extra={"example": 0.001})  # costo relativo (mock)
-
-
-class IAEstimateResponse(BaseModel):
-    estimated_runtime_seconds: float = Field(..., json_schema_extra={"example": 12.5})
-    estimated_cost: float = Field(..., json_schema_extra={"example": 0.003})
-    complexity_score: float = Field(..., json_schema_extra={"example": 0.42})
-    breakdown: List[IAEstimateBreakdownItem]
-    rationale: str = Field(..., json_schema_extra={"example": "Estimación determinística basada en tipo y número de pasos."})
-    confidence: float = Field(..., json_schema_extra={"example": 0.8})
-
-
-# --------------------- Repositorio en memoria ---------------------
-
-class InMemoryWorkflowRepo:
-    """Repositorio simple en memoria para almacenar workflows durante la ejecución del proceso."""
-
-    def __init__(self) -> None:
-        self._store: Dict[str, WorkflowItem] = {}
-
-    def create(self, name: str) -> WorkflowItem:
-        wid = str(uuid4())
-        item = WorkflowItem(
-            id=wid,
-            name=name,
-            status="en_progreso",
-            created_at = datetime.now(UTC).replace(microsecond=0).isoformat(),
-        )
-        self._store[wid] = item
-        return item
-
-    def get(self, wid: str) -> Optional[WorkflowItem]:
-        return self._store.get(wid)
-
-    def list(self) -> List[WorkflowItem]:
-        return list(self._store.values())
-
-
-#_repo = InMemoryWorkflowRepo()
-
-
-# --------------------- Repositorio SQLModel ---------------------
-
-class SQLiteWorkflowRepo:
-    """
-    Implementación de repositorio usando SQLModel + SQLite (puede operar en memoria).
-    Compatible con la interfaz del repositorio en memoria.
-    """
-
-    def __init__(self, engine):
-        self.engine = engine
-
-    def create_schema(self) -> None:
-        """Crea las tablas necesarias en el motor proporcionado."""
-        SQLModel.metadata.create_all(self.engine)
-
-    def create(self, name: str, definition: Optional[Dict[str, Any]] = None) -> WorkflowItem:
-        """Inserta un nuevo workflow y devuelve un WorkflowItem."""
-        wid = str(uuid4())
-        now = datetime.now(UTC).replace(microsecond=0).isoformat()
-
-        with Session(self.engine) as session:
-            record = WorkflowTable(
-                id=wid,
-                name=name,
-                status="en_espera",
-                created_at=now,
-                updated_at=now,
-                definition=json.dumps(definition or {}),
-            )
-            session.add(record)
-            session.commit()
-        return WorkflowItem(id=wid, name=name, status="en_espera", created_at=now)
-
-    def get(self, wid: str) -> Optional[WorkflowItem]:
-        """Obtiene un workflow por ID, o None si no existe."""
-        with Session(self.engine) as session:
-            stmt = select(WorkflowTable).where(WorkflowTable.id == wid)
-            record = session.exec(stmt).first()
-            if not record:
-                return None
-            return WorkflowItem(
-                id=record.id,
-                name=record.name,
-                status=record.status,
-                created_at=record.created_at,
-            )
-
-    def list(self) -> List[WorkflowItem]:
-        """Devuelve todos los workflows registrados."""
-        with Session(self.engine) as session:
-            records = session.exec(select(WorkflowTable)).all()
-            return [
-                WorkflowItem(
-                    id=r.id,
-                    name=r.name,
-                    status=r.status,
-                    created_at=r.created_at,
-                )
-                for r in records
-            ]
-
-# --- Creación del motor y repositorio ---
-# Usar una base de datos en archivo para persistencia entre reinicios.
-sqlite_file_name = "database.db"
-sqlite_url = f"sqlite:///{sqlite_file_name}"
-
-# connect_args es necesario para SQLite para permitir uso en múltiples hilos (como hace FastAPI)
-engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
-
-_repo = SQLiteWorkflowRepo(engine=engine)
-
-# Asegurarse de que la tabla exista al iniciar la app
-_repo.create_schema()
-
-
-# ----------------------------- Proxy -----------------------------
-
-class AuthProxy:
-    """Proxy de autenticación que valida el token y delega operaciones al repositorio."""
-
-    def __init__(self, repo: SQLiteWorkflowRepo) -> None:
-        self._repo = repo
-
-    def _validate_token(self, authorization: Optional[str]) -> None:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        token = authorization.split(" ", 1)[1].strip()
-        if not token.startswith("mock-"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-
-    def create_workflow(self, authorization: Optional[str], req: WorkflowCreate) -> WorkflowMinimal:
-        self._validate_token(authorization)
-        item = self._repo.create(name=req.name, definition=req.definition)
-        return WorkflowMinimal(id=item.id, status=item.status)
-
-    def get_workflow_status(self, authorization: Optional[str], wid: str) -> WorkflowMinimal:
-        self._validate_token(authorization)
-        item = self._repo.get(wid)
-        if not item:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-        return WorkflowMinimal(id=item.id, status=item.status)
-
-    def list_workflows(self, authorization: Optional[str]) -> List[WorkflowItem]:
-        self._validate_token(authorization)
-        return self._repo.list()
-
-proxy = AuthProxy(_repo)
-
-
-# --------------------------- Endpoints ---------------------------
+# ============================================================================
+# Authentication Endpoints
+# ============================================================================
 
 @app.post("/login", response_model=LoginResponse, tags=["auth"])
 def login(payload: LoginRequest) -> LoginResponse:
     """
-    Autenticación de ejemplo:
-    - username: demo
-    - password: demo123
+    Mock authentication endpoint.
+    Accepts username='demo', password='demo123'
     """
     if not (payload.username == "demo" and payload.password == "demo123"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
     user_id = str(uuid4())
     return LoginResponse(
-        access_token="mock-" + str(uuid4()).replace("-", "")[:12],
+        access_token=f"mock-{uuid4().hex[:12]}",
         token_type="bearer",
         user=UserInfo(id=user_id, name="Demo User"),
     )
 
 
-@app.post("/workflow", response_model=WorkflowMinimal, status_code=status.HTTP_201_CREATED, tags=["workflows"])
-def create_workflow(req: WorkflowCreate, authorization: Optional[str] = Header(default=None)) -> WorkflowMinimal:
-    return proxy.create_workflow(authorization=authorization, req=req)
+# ============================================================================
+# Task Types Endpoints
+# ============================================================================
+
+@app.get("/task-types", response_model=List[TaskType], tags=["task-types"])
+async def get_task_types(token: str = Depends(validate_token)) -> List[TaskType]:
+    """
+    Get catalog of available task types.
+    These correspond to the strategies implemented in the Worker.
+    """
+    task_types = [
+        TaskType(
+            type="http_get",
+            display_name="Petición HTTP GET",
+            version="1.0.0",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                },
+                "required": ["url"],
+            },
+        ),
+        TaskType(
+            type="validate_csv",
+            display_name="Validar Archivo CSV",
+            version="1.0.0",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "columns": {"type": "array"},
+                    "delimiter": {"type": "string"},
+                },
+                "required": ["file_path", "columns"],
+            },
+        ),
+        TaskType(
+            type="transform_simple",
+            display_name="Transformación Simple",
+            version="1.0.0",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "operations": {"type": "array"},
+                },
+                "required": ["operations"],
+            },
+        ),
+        TaskType(
+            type="save_db",
+            display_name="Guardar en Base de Datos",
+            version="1.0.0",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["append", "replace"]},
+                },
+                "required": ["table"],
+            },
+        ),
+        TaskType(
+            type="notify_mock",
+            display_name="Notificación de Prueba",
+            version="1.0.0",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+                "required": ["channel", "message"],
+            },
+        ),
+    ]
+    return task_types
 
 
-@app.get("/workflows/{id}/status", response_model=WorkflowMinimal, tags=["workflows"])
-def get_workflow_status(id: str, authorization: Optional[str] = Header(default=None)) -> WorkflowMinimal:
-    return proxy.get_workflow_status(authorization=authorization, wid=id)
+# ============================================================================
+# Workflow Endpoints
+# ============================================================================
+
+@app.post("/workflows", response_model=WorkflowDetailDTO, status_code=201, tags=["workflows"])
+async def create_workflow(
+    data: CreateWorkflowDTO,
+    token: str = Depends(validate_token)
+) -> WorkflowDetailDTO:
+    """
+    Create a new workflow.
+    Converts Frontend format (steps + edges) to Worker format (nodes with depends_on).
+    """
+    return repo.create_workflow(data)
 
 
-@app.get("/workflows", response_model=List[WorkflowItem], tags=["workflows"])
-def list_workflows(authorization: Optional[str] = Header(default=None)) -> List[WorkflowItem]:
-    return proxy.list_workflows(authorization=authorization)
+@app.get("/workflows", response_model=List[WorkflowListItem], tags=["workflows"])
+async def list_workflows(token: str = Depends(validate_token)) -> List[WorkflowListItem]:
+    """Get list of all workflows"""
+    return repo.list_workflows()
 
 
-# ------------------------- Endpoint IA -------------------------
+@app.get("/workflows/{id}", response_model=WorkflowDetailDTO, tags=["workflows"])
+async def get_workflow(id: str, token: str = Depends(validate_token)) -> WorkflowDetailDTO:
+    """Get workflow by ID with steps and edges"""
+    workflow = repo.get_workflow(id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return workflow
+
+
+@app.put("/workflows/{id}", response_model=WorkflowDetailDTO, tags=["workflows"])
+async def update_workflow(
+    id: str,
+    data: UpdateWorkflowDTO,
+    token: str = Depends(validate_token)
+) -> WorkflowDetailDTO:
+    """Update workflow"""
+    workflow = repo.update_workflow(id, data)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return workflow
+
+
+@app.delete("/workflows/{id}", status_code=204, tags=["workflows"])
+async def delete_workflow(id: str, token: str = Depends(validate_token)):
+    """Delete workflow"""
+    success = repo.delete_workflow(id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return None
+
+
+# ============================================================================
+# Workflow Execution Endpoints
+# ============================================================================
+
+@app.post("/workflows/{id}/runs", response_model=Run, tags=["runs"])
+async def trigger_workflow(id: str, token: str = Depends(validate_token)) -> Run:
+    """
+    Trigger workflow execution.
+    Sets workflow status to 'en_espera' so Worker picks it up.
+    """
+    run = repo.trigger_workflow(id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return run
+
+
+@app.get("/workflows/{workflow_id}/runs", response_model=List[Run], tags=["runs"])
+async def get_workflow_runs(
+    workflow_id: str,
+    token: str = Depends(validate_token)
+) -> List[Run]:
+    """Get execution history for a workflow"""
+    return repo.get_workflow_runs(workflow_id)
+
+
+@app.get("/runs/{run_id}", response_model=RunDetailDTO, tags=["runs"])
+async def get_run_detail(run_id: str, token: str = Depends(validate_token)) -> RunDetailDTO:
+    """Get run details with task instances"""
+    run_detail = repo.get_run_detail(run_id)
+    if not run_detail:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run_detail
+
+
+@app.get("/runs/{run_id}/logs", response_model=List[LogEntry], tags=["runs"])
+async def get_run_logs(
+    run_id: str,
+    task: Optional[str] = None,
+    page: int = 1,
+    limit: int = 100,
+    token: str = Depends(validate_token)
+) -> List[LogEntry]:
+    """
+    Get logs for a run.
+    Generates synthetic logs from noderun data since Worker doesn't expose structured logs yet.
+    """
+    return repo.get_run_logs(run_id, task)
+
+
+@app.post("/runs/{run_id}/cancel", response_model=Run, tags=["runs"])
+async def cancel_run(run_id: str, token: str = Depends(validate_token)) -> Run:
+    """
+    Cancel a running workflow.
+    Currently not implemented - Worker doesn't support cancellation yet.
+    """
+    raise HTTPException(status_code=501, detail="Cancellation not implemented")
+
+
+# ============================================================================
+# IA Service Endpoints
+# ============================================================================
 
 @app.post("/ia/suggestion", response_model=IASuggestionResponse, tags=["ia"])
 async def ia_suggestion(
@@ -454,16 +343,13 @@ async def ia_suggestion(
     token: str = Depends(validate_token),
 ) -> IASuggestionResponse:
     """
-    Devuelve sugerencias generadas por el agente IA usando Gemini.
-
-    Raises:
-        HTTPException: 500 si la API de IA falla después de 3 reintentos
+    Get AI suggestions for workflow improvement.
+    Uses Gemini API for intelligent analysis.
     """
     try:
         client = ia_client.get_ia_client()
         result = client.suggest(payload.definition)
 
-        # Mapeo de la respuesta del cliente al modelo de respuesta de la API
         suggestions_list = []
         for change in result.get("suggested_changes", []):
             suggestions_list.append(
@@ -484,7 +370,7 @@ async def ia_suggestion(
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al obtener sugerencias de la API de IA después de múltiples intentos: {str(e)}"
+            detail=f"Error getting AI suggestions: {str(e)}"
         )
 
 
@@ -494,19 +380,15 @@ async def ia_fix(
     token: str = Depends(validate_token),
 ) -> IAFixResponse:
     """
-    Devuelve una versión corregida del workflow usando Gemini.
-
-    Raises:
-        HTTPException: 500 si la API de IA falla después de 3 reintentos
+    Get AI fixes for workflow errors.
+    Uses Gemini API to analyze and fix issues.
     """
     try:
         client = ia_client.get_ia_client()
         result = client.fix(payload.definition, payload.logs)
 
-        # Mapear la respuesta del cliente al modelo de respuesta de la API
         changes_list = []
         for note in result.get("notes", []):
-            # Parsear las notas para crear cambios estructurados
             if "timeout" in note.lower():
                 changes_list.append(
                     IAFixChangeItem(
@@ -547,13 +429,13 @@ async def ia_fix(
         return IAFixResponse(
             patched_definition=result.get("patched_definition", payload.definition),
             changes=changes_list,
-            rationale=". ".join(result.get("notes", [])) if result.get("notes") else "Correcciones aplicadas por IA.",
+            rationale=". ".join(result.get("notes", [])) if result.get("notes") else "Fixes applied by AI.",
             confidence=0.9,
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al obtener correcciones de la API de IA después de múltiples intentos: {str(e)}"
+            detail=f"Error getting AI fixes: {str(e)}"
         )
 
 
@@ -563,10 +445,8 @@ async def ia_estimate(
     token: str = Depends(validate_token),
 ) -> IAEstimateResponse:
     """
-    Devuelve una estimación de tiempo y costo del workflow usando Gemini.
-
-    Raises:
-        HTTPException: 500 si la API de IA falla después de 3 reintentos
+    Get AI estimation for workflow execution.
+    Uses Gemini API to estimate time and cost.
     """
     try:
         client = ia_client.get_ia_client()
@@ -582,5 +462,64 @@ async def ia_estimate(
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al obtener estimación de la API de IA después de múltiples intentos: {str(e)}"
+            detail=f"Error getting AI estimation: {str(e)}"
         )
+
+
+# ============================================================================
+# Health Check
+# ============================================================================
+
+@app.get("/health", tags=["health"])
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "database": "connected",
+        "database_path": DB_PATH
+    }
+
+
+# ============================================================================
+# FILE UPLOAD ENDPOINTS
+# ============================================================================
+
+@app.post("/files/upload-csv", tags=["files"])
+async def upload_csv(
+    file: UploadFile = File(...),
+    token: str = Depends(validate_token)
+):
+    """
+    Upload a CSV file to the server for use in workflows.
+    Returns the path where the file was saved.
+    """
+    # Validate file type
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are allowed")
+
+    # Create uploads directory if it doesn't exist
+    upload_dir = os.path.join(os.path.dirname(DB_PATH), "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Generate unique filename
+    file_id = uuid4().hex[:8]
+    safe_filename = f"{file_id}_{file.filename}"
+    file_path = os.path.join(upload_dir, safe_filename)
+
+    # Save file
+    try:
+        contents = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(contents)
+
+        return {
+            "success": True,
+            "filename": safe_filename,
+            "path": file_path,
+            "size": len(contents),
+            "original_name": file.filename
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
+
