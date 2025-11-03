@@ -352,13 +352,27 @@ async def ia_suggestion(
 
         suggestions_list = []
         for change in result.get("suggested_changes", []):
+            # Construir detail basado en el tipo de operación
+            detail = {}
+            if change.get("op") == "add_arg" or change.get("op") == "modify_arg":
+                detail = {
+                    "arg_name": change.get("arg_name"),
+                    "arg_value": change.get("arg_value")
+                }
+            elif change.get("op") == "add_node":
+                detail = {"node": change.get("node")}
+            elif change.get("op") == "reorder":
+                detail = change.get("detail", {})
+            else:
+                detail = change.get("detail", {})
+
             suggestions_list.append(
                 IASuggestionItem(
                     kind=change.get("op", "unknown"),
                     path=f"steps[{change.get('target_step_index', -1)}]",
-                    message=change.get("reason", "No message provided."),
-                    confidence=0.5,
-                    detail={"arg_name": change.get("arg_name"), "arg_value": change.get("arg_value")},
+                    message=change.get("reason", change.get("message", "Optimización sugerida")),
+                    confidence=change.get("confidence", 0.75),
+                    detail=detail,
                 )
             )
 

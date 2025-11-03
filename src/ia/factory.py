@@ -6,7 +6,7 @@ Permite crear diferentes proveedores según configuración.
 """
 import os
 from typing import Optional
-from .providers import IAProviderStrategy, MockIAProvider, GeminiProvider
+from .providers import IAProviderStrategy, MockIAProvider, GeminiProvider, OpenAIProvider
 
 
 class IAProviderFactory:
@@ -50,10 +50,14 @@ class IAProviderFactory:
             model = kwargs.get("model") or os.getenv("GEMINI_MODEL", "gemini-pro")
             return GeminiProvider(api_key=api_key, model=model)
 
+        elif provider_type == "openai":
+            model = kwargs.get("model") or os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+            return OpenAIProvider(api_key=api_key, model=model)
+
         else:
             raise ValueError(
                 f"Tipo de proveedor desconocido: {provider_type}. "
-                f"Tipos válidos: 'mock', 'gemini'"
+                f"Tipos válidos: 'mock', 'gemini', 'openai'"
             )
 
     @staticmethod
@@ -62,9 +66,11 @@ class IAProviderFactory:
         Crea un proveedor de IA basado completamente en variables de entorno.
 
         Variables de entorno utilizadas:
-        - IA_PROVIDER: Tipo de proveedor ("mock" o "gemini")
-        - GEMINI_API_KEY: API key de Google AI Studio (requerido si IA_PROVIDER=gemini)
+        - IA_PROVIDER: Tipo de proveedor ("mock", "gemini" o "openai")
+        - GEMINI_API_KEY: API key de Google AI Studio (requerido si IA_PROVIDER=gemini) o OpenAI
         - GEMINI_MODEL: Modelo de Gemini a usar (default: gemini-pro)
+        - OPENAI_API_KEY: API key de OpenAI (opcional, puede usar GEMINI_API_KEY)
+        - OPENAI_MODEL: Modelo de OpenAI a usar (default: gpt-3.5-turbo)
 
         Returns:
             Instancia del proveedor configurado
@@ -79,4 +85,4 @@ class IAProviderFactory:
         Returns:
             Lista de nombres de proveedores
         """
-        return ["mock", "gemini"]
+        return ["mock", "gemini", "openai"]
