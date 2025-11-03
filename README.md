@@ -40,13 +40,13 @@ La API encapsula la capa de interacción con clientes. Recibe definiciones de wo
 
 ```mermaid
 graph TD
-    FE[Frontend<br/>React / Vue] -->|REST / OpenAPI| API[Backend API<br/>FastAPI]
-    API -->|DTOs & Validación| Repo[WorkflowRepository]
-    Repo -->|CRUD SQLModel| DB[(SQLite<br/>workflows.db)]
-    Worker[Worker Engine] -->|Polling & Ejecución| DB
-    API -->|Eventos IA| IAClient[IAClient (Facade)]
-    IAClient -->|Strategy| IAProviders[Proveedores IA<br/>Mock / Gemini / OpenAI]
-    IAClient -->|Observer| Observers[LogObserver<br/>MetricsObserver]
+    FE["Frontend<br/>React / Vue"] -->|REST / OpenAPI| API["Backend API<br/>FastAPI"]
+    API -->|DTOs & Validación| Repo["WorkflowRepository"]
+    Repo -->|CRUD SQLModel| DB["SQLite<br/>workflows.db"]
+    Worker["Worker Engine"] -->|Polling & Ejecución| DB
+    API -->|Eventos IA| IAClient["IAClient (Facade)"]
+    IAClient -->|Strategy| IAProviders["Proveedores IA<br/>Mock / Gemini / OpenAI"]
+    IAClient -->|Observer| Observers["LogObserver<br/>MetricsObserver"]
     API -->|Status & Logs| FE
 ```
 
