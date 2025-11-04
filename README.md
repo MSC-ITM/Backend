@@ -222,11 +222,12 @@ Backend/
    ```bash
    pip install -r requirements.txt
    ```
-3. Crear el archivo `.env` (opcional) en `Backend/`:
+3. Crear el archivo `.env` copiar de `.env.example` en `Backend/`:
    ```text
    IA_PROVIDER=mock          # mock | gemini | openai
    GEMINI_API_KEY=...       # requerido si IA_PROVIDER=gemini
    OPENAI_API_KEY=...       # alternativo si IA_PROVIDER=openai
+   OPENAI_MODEL=...         # requerido si IA_PROVIDER=openai
    MOCK_TOKEN_SECRET=demo   # usado por pruebas de autenticación
    ```
 4. Asegurarse de que exista el directorio `data/`. El repositorio lo crea automáticamente si no está presente.
