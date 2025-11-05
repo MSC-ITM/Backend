@@ -5,7 +5,7 @@ Guía central del ecosistema que combina **Frontend**, **Backend** y **Worker** 
 ---
 
 ## 📋 Tabla de Contenidos
-- [Qué es este proyecto](#-qué-es-este-proyecto)
+- [Descripción general del proyecto](#descripción-general-del-proyecto)
 - [Arquitectura Global](#-arquitectura-global)
 - [Módulos y responsabilidades](#-módulos-y-responsabilidades)
 - [Flujos clave](#-flujos-clave)
@@ -16,7 +16,7 @@ Guía central del ecosistema que combina **Frontend**, **Backend** y **Worker** 
 
 ---
 
-## ✨ Qué es este proyecto
+## Descripción general del proyecto
 
 Plataforma colaborativa para orquestar procesos con tareas encadenadas, telemetría y asistencia de IA. El **Frontend** ofrece un editor visual y paneles en tiempo real; el **Backend** expone contratos REST/OpenAPI que traducen formatos y coordinan la persistencia; el **Worker** materializa la ejecución y aplica estrategias de tareas, decoradores y comandos IA.
 
@@ -150,7 +150,6 @@ sequenceDiagram
   - Backend: `Backend/README.md`
   - Worker: `Worker/Documentacion/README.md`
 - Base de datos compartida: `data/workflows.db` (esquema detallado en `Backend/BD_DISENIO.md`).
-- Roadmap granular y tareas pendientes: consultar `TODOs.md`.
 
 ---
 
