@@ -134,15 +134,6 @@ sequenceDiagram
 
 ---
 
-## 🗺️ Roadmap compartido
-
-- Consolidar autenticación real end-to-end (Frontend ↔ Backend ↔ Worker).
-- Unificar métricas y monitoreo (exponer eventos Worker vía Backend para dashboards).
-- Exponer ejecuciones del Worker mediante WebSockets o colas para mejorar feedback en tiempo real.
-- Desacoplar proveedores IA reales y mocks detrás de configuraciones de entorno comúnes.
-
----
-
 ## 📚 Recursos y referencias
 
 - Documentación específica por módulo:
